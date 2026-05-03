@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+
+echo "Running tests..."
+cargo test || exit 1
+
+echo "All checks passed - push approved!"
