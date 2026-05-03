@@ -1,0 +1,17 @@
+# Rust
+/target/
+
+# logs
+*.log
+
+# environment variables
+.env
+
+# trash
+/trash
+
+# node
+/node_modules
+
+# notes
+notes.md
