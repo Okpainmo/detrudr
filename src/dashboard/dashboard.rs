@@ -1,0 +1,354 @@
+use crate::{config::DashboardAuth, engine::DetectionEngine};
+use log::{error, info};
+use parking_lot::Mutex;
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::Read,
+    net::ToSocketAddrs,
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+
+const DASHBOARD_HTML: &str = include_str!("pages/index.html");
+const AUTH_HTML: &str = include_str!("pages/auth.html");
+const SESSION_SECONDS: u64 = 60 * 60;
+
+// Max failed attempts before lockout, and the window + lockout durations.
+const MAX_ATTEMPTS: u32 = 5;
+const ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
+const LOCKOUT_DURATION: Duration = Duration::from_secs(30);
+
+// --- Session store: token -> expiry instant ---
+type Sessions = Arc<Mutex<HashMap<String, Instant>>>;
+
+// --- Login rate limiter: ip -> (failure_count, window_start) ---
+type LoginLimiter = Arc<Mutex<HashMap<String, (u32, Instant)>>>;
+
+pub fn start_dashboard(
+    host: &str,
+    port: u16,
+    engine: Arc<Mutex<DetectionEngine>>,
+    auth: DashboardAuth,
+) -> anyhow::Result<()> {
+    let address = format!("{host}:{port}");
+    let bind = address
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid dashboard bind address {address}"))?;
+    let server = Server::http(bind).map_err(|error| anyhow::anyhow!("{error}"))?;
+
+    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+    let limiter: LoginLimiter = Arc::new(Mutex::new(HashMap::new()));
+
+    thread::Builder::new()
+        .name("dashboard".to_owned())
+        .spawn(move || {
+            info!("Dashboard listening on http://{bind}");
+            for request in server.incoming_requests() {
+                if let Err(error) = handle_request(request, &engine, &auth, &sessions, &limiter) {
+                    error!("dashboard request failed: {error}");
+                }
+            }
+        })?;
+    Ok(())
+}
+
+fn handle_request(
+    request: Request,
+    engine: &Arc<Mutex<DetectionEngine>>,
+    auth: &DashboardAuth,
+    sessions: &Sessions,
+    limiter: &LoginLimiter,
+) -> anyhow::Result<()> {
+    let path = request.url().to_owned();
+    let method = request.method().clone();
+
+    if method == Method::Post && path == "/auth" {
+        return handle_login(request, auth, sessions, limiter);
+    }
+
+    if path == "/logout" {
+        // Revoke the session token if present.
+        if let Some(token) = extract_session_cookie(&request) {
+            sessions.lock().remove(&token);
+        }
+        let response = redirect_response("/").with_header(delete_cookie_header("session"));
+        request.respond(response)?;
+        return Ok(());
+    }
+
+    if path == "/public/logo.png" {
+        let response = Response::from_data(include_bytes!("public/logo.png").as_ref())
+            .with_header(Header::from_bytes("Content-Type", "image/png").unwrap());
+        request.respond(response)?;
+        return Ok(());
+    }
+
+    if !is_authenticated(&request, sessions) {
+        return respond_auth(request, StatusCode(200), None);
+    }
+
+    if path == "/metrics" {
+        let snapshot = engine.lock().snapshot();
+        match serde_json::to_string(&snapshot) {
+            Ok(body) => {
+                let response = Response::from_string(body).with_header(json_header());
+                request.respond(response)?;
+            }
+            Err(error) => {
+                let response =
+                    Response::from_string("serialization error").with_status_code(StatusCode(500));
+                request.respond(response)?;
+                error!("failed to serialize metrics: {error}");
+            }
+        }
+        return Ok(());
+    }
+
+    let response = Response::from_string(DASHBOARD_HTML).with_header(html_header());
+    request.respond(response)?;
+    Ok(())
+}
+
+fn handle_login(
+    mut request: Request,
+    auth: &DashboardAuth,
+    sessions: &Sessions,
+    limiter: &LoginLimiter,
+) -> anyhow::Result<()> {
+    // Derive a best-effort IP from the X-Forwarded-For or remote address.
+    let ip = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("X-Forwarded-For"))
+        .map(|h| {
+            h.value
+                .as_str()
+                .split(',')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_owned()
+        })
+        .unwrap_or_else(|| {
+            request
+                .remote_addr()
+                .map(|a| a.ip().to_string())
+                .unwrap_or_default()
+        });
+
+    // Check rate limit before even reading the body.
+    if is_rate_limited(&ip, limiter) {
+        return respond_auth(
+            request,
+            StatusCode(429),
+            Some("Too many failed attempts. Please wait 30 seconds."),
+        );
+    }
+
+    let mut body = String::new();
+    request.as_reader().read_to_string(&mut body)?;
+    let form = parse_form_body(&body);
+    let email = form.get("email").map(String::as_str).unwrap_or_default();
+    let password = form.get("password").map(String::as_str).unwrap_or_default();
+
+    if email == auth.email && password == auth.password {
+        // Reset any accumulated failures for this IP on success.
+        limiter.lock().remove(&ip);
+
+        let token = generate_token();
+        let expiry = Instant::now() + Duration::from_secs(SESSION_SECONDS);
+        sessions.lock().insert(token.clone(), expiry);
+
+        let response = redirect_response("/").with_header(session_cookie_header(&token));
+        request.respond(response)?;
+        return Ok(());
+    }
+
+    // Record this failure.
+    record_failure(&ip, limiter);
+    respond_auth(
+        request,
+        StatusCode(401),
+        Some("Invalid email or password. Try again."),
+    )
+}
+
+fn respond_auth(
+    request: Request,
+    status: StatusCode,
+    error_message: Option<&str>,
+) -> anyhow::Result<()> {
+    let (error_text, error_hidden) = match error_message {
+        Some(msg) => (msg, ""),
+        None => ("", "hidden"),
+    };
+    let html = AUTH_HTML
+        .replace("{{error_hidden}}", error_hidden)
+        .replace("{{error}}", error_text);
+    let response = Response::from_string(html)
+        .with_status_code(status)
+        .with_header(html_header());
+    request.respond(response)?;
+    Ok(())
+}
+
+fn is_authenticated(request: &Request, sessions: &Sessions) -> bool {
+    let Some(token) = extract_session_cookie(request) else {
+        return false;
+    };
+    let mut store = sessions.lock();
+    match store.get(&token) {
+        Some(&expiry) if Instant::now() < expiry => true,
+        _ => {
+            // Token missing or expired — clean it up.
+            store.remove(&token);
+            false
+        }
+    }
+}
+
+fn extract_session_cookie(request: &Request) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .filter(|h| h.field.equiv("Cookie"))
+        .flat_map(|h| parse_cookie_header(h.value.as_str()))
+        .find_map(|(k, v)| if k == "session" { Some(v) } else { None })
+}
+
+fn is_rate_limited(ip: &str, limiter: &LoginLimiter) -> bool {
+    let store = limiter.lock();
+    if let Some(&(count, window_start)) = store.get(ip) {
+        // Still within the window and over the limit → locked out.
+        if count >= MAX_ATTEMPTS && window_start.elapsed() < LOCKOUT_DURATION {
+            return true;
+        }
+    }
+    false
+}
+
+fn record_failure(ip: &str, limiter: &LoginLimiter) {
+    let mut store = limiter.lock();
+    let now = Instant::now();
+    let entry = store.entry(ip.to_owned()).or_insert((0, now));
+    // Reset window if the previous attempt window has expired.
+    if entry.1.elapsed() > ATTEMPT_WINDOW {
+        *entry = (0, now);
+    }
+    entry.0 += 1;
+}
+
+/// Generates a 128-bit random hex token from /dev/urandom — no extra dependency needed.
+fn generate_token() -> String {
+    let mut buf = [0u8; 16];
+    File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .unwrap_or_default();
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn parse_cookie_header(raw: &str) -> HashMap<String, String> {
+    raw.split(';')
+        .filter_map(|pair| {
+            let (key, value) = pair.trim().split_once('=')?;
+            Some((key.trim().to_owned(), percent_decode(value.trim())))
+        })
+        .collect()
+}
+
+fn parse_form_body(raw: &str) -> HashMap<String, String> {
+    raw.split('&')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            Some((percent_decode(key), percent_decode(value)))
+        })
+        .collect()
+}
+
+fn percent_decode(raw: &str) -> String {
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut iter = raw.as_bytes().iter().copied();
+    while let Some(byte) = iter.next() {
+        match byte {
+            b'+' => bytes.push(b' '),
+            b'%' => {
+                let first = iter.next();
+                let second = iter.next();
+                if let (Some(first), Some(second)) = (first, second) {
+                    if let Ok(value) =
+                        u8::from_str_radix(&String::from_utf8_lossy(&[first, second]), 16)
+                    {
+                        bytes.push(value);
+                        continue;
+                    }
+                }
+                bytes.push(byte);
+            }
+            _ => bytes.push(byte),
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn redirect_response(location: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    Response::from_string("")
+        .with_status_code(StatusCode(303))
+        .with_header(Header::from_bytes("Location", location).expect("valid header"))
+}
+
+fn session_cookie_header(token: &str) -> Header {
+    let cookie =
+        format!("session={token}; Max-Age={SESSION_SECONDS}; Path=/; HttpOnly; SameSite=Lax");
+    Header::from_bytes("Set-Cookie", cookie).expect("valid header")
+}
+
+fn delete_cookie_header(name: &str) -> Header {
+    let cookie = format!("{name}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax");
+    Header::from_bytes("Set-Cookie", cookie).expect("valid header")
+}
+
+fn json_header() -> Header {
+    Header::from_bytes("Content-Type", "application/json").expect("valid header")
+}
+
+fn html_header() -> Header {
+    Header::from_bytes("Content-Type", "text/html; charset=utf-8").expect("valid header")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_cookie_header() {
+        let cookies = parse_cookie_header("session=abc123; other=val");
+        assert_eq!(cookies.get("session"), Some(&"abc123".to_owned()));
+    }
+
+    #[test]
+    fn parses_form_body() {
+        let form = parse_form_body("email=admin%40example.com&password=hello+world");
+        assert_eq!(form.get("email"), Some(&"admin@example.com".to_owned()));
+        assert_eq!(form.get("password"), Some(&"hello world".to_owned()));
+    }
+
+    #[test]
+    fn rate_limiter_blocks_after_max_attempts() {
+        let limiter: LoginLimiter = Arc::new(Mutex::new(HashMap::new()));
+        for _ in 0..MAX_ATTEMPTS {
+            assert!(!is_rate_limited("1.2.3.4", &limiter));
+            record_failure("1.2.3.4", &limiter);
+        }
+        assert!(is_rate_limited("1.2.3.4", &limiter));
+    }
+
+    #[test]
+    fn generate_token_is_32_chars() {
+        let token = generate_token();
+        assert_eq!(token.len(), 32);
+    }
+}

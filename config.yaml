@@ -1,0 +1,44 @@
+app:
+  log_level: INFO
+
+log:
+  path: /var/log/nginx/detrudr-stream.log
+
+window:
+  seconds: 60
+
+baseline:
+  history_seconds: 1800
+  recalc_interval_seconds: 60
+  min_samples_per_hour: 300
+  floor_mean: 1.0
+  floor_stddev: 0.5
+
+thresholds:
+  zscore: 3.0
+  rate_multiplier: 5.0
+  tightening_factor: 1.5
+  error_multiplier: 3.0
+  error_floor_mean: 0.05
+  error_floor_stddev: 0.01
+  global_alert_cooldown_seconds: 60
+
+blocking:
+  dry_run: false
+  iptables_chain: INPUT
+  ban_minutes:
+    - 10
+    - 30
+  ban_hours_final: 2
+
+slack:
+  enabled: true
+  webhook_url: ""
+  channel: ""
+
+dashboard:
+  host: 0.0.0.0
+  port: 8090
+
+audit:
+  path: /tmp/detrudr-audit.log
