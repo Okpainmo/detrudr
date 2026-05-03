@@ -1,0 +1,3 @@
+[alias]
+dev="watch -c -w src -x run"
+# dev="watch --poll -c -w src -x run" # use this if on WSL and reload doesn't trigger
