@@ -81,15 +81,26 @@ Environment overrides match the Python version:
 - `DRY_RUN` overrides `blocking.dry_run`.
 - `EMAIL` and `PASSWORD` are required for dashboard login.
 
-For systemd deployments, prefer a persistent audit path such as `/var/log/detrudr/audit.log`. The
-service can let systemd create the directory with the right ownership:
+For systemd deployments, create a dedicated service user during installation:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin detrudr
+```
+
+Then run the service as that user and grant only the capability needed for `iptables` enforcement:
 
 ```ini
 [Service]
-User=your-user-name
-Group=your-group-name
+User=detrudr
+Group=detrudr
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
 LogsDirectory=detrudr
 ```
+
+`LogsDirectory=detrudr` lets systemd create `/var/log/detrudr` with the right ownership for the
+default audit path.
 
 ## Run Locally
 
@@ -107,7 +118,8 @@ cp .env.sample .env
 docker compose up -d --build
 ```
 
-The detector container uses host networking and `NET_ADMIN` so it can see host nginx logs and manage
+The runtime image uses a non-root `detrudr` user. If Docker is used for real blocking, the container
+still needs host networking and `NET_ADMIN` at runtime so it can see host nginx logs and manage
 `iptables` rules.
 
 ## Expected nginx JSON Log Format

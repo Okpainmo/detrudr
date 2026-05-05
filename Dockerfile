@@ -1,4 +1,4 @@
-FROM rust:1.78-slim AS builder
+FROM rust:1.92-slim AS builder
 
 WORKDIR /src
 
@@ -15,16 +15,24 @@ RUN touch src/main.rs && cargo build --release
 # --- Runtime image ---
 FROM debian:bookworm-slim
 
+ENV DEBIAN_FRONTEND=noninteractive
+
 WORKDIR /app
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends iptables ca-certificates && \
+    groupadd --system detrudr && \
+    useradd --system --gid detrudr --home-dir /nonexistent --shell /usr/sbin/nologin detrudr && \
+    mkdir -p /var/log/detrudr && \
+    chown -R detrudr:detrudr /app /var/log/detrudr && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/target/release/detrudr /usr/local/bin/detrudr
-COPY config.yaml /app/config.yaml
+COPY --chown=detrudr:detrudr config.yaml /app/config.yaml
 
 EXPOSE 8090
+
+USER detrudr
 
 CMD ["detrudr", "--config", "/app/config.yaml"]
