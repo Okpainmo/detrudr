@@ -88,7 +88,7 @@ pub fn load_config(path: &Path) -> Result<Config> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read config {}", path.display()))?;
     let mut config: Config = serde_yaml::from_str(&raw).context("failed to parse config yaml")?;
-    apply_env_overrides(&mut config);
+    apply_env_overrides(&mut config)?;
     Ok(config)
 }
 
@@ -136,7 +136,7 @@ pub fn load_dashboard_auth() -> Result<DashboardAuth> {
     Ok(DashboardAuth { email, password })
 }
 
-fn apply_env_overrides(config: &mut Config) {
+fn apply_env_overrides(config: &mut Config) -> Result<()> {
     if let Ok(path) = env::var("LOG_PATH") {
         if !path.trim().is_empty() {
             config.log.path = path.trim().to_owned();
@@ -151,5 +151,19 @@ fn apply_env_overrides(config: &mut Config) {
         if !channel.trim().is_empty() {
             config.slack.channel = channel.trim().to_owned();
         }
+    }
+    if let Ok(dry_run) = env::var("DRY_RUN") {
+        if !dry_run.trim().is_empty() {
+            config.blocking.dry_run = parse_bool_env("DRY_RUN", &dry_run)?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_bool_env(name: &str, value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "y" | "on" => Ok(true),
+        "false" | "0" | "no" | "n" | "off" => Ok(false),
+        _ => anyhow::bail!("{name} must be a boolean value such as true or false"),
     }
 }

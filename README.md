@@ -50,11 +50,23 @@ docker-compose.yaml
 Static settings live in `config.yaml`. Runtime values can be provided in `.env`:
 
 ```env
+####################################################################
+# Slack
+####################################################################
 WEB_HOOK_URL=https://hooks.slack.com/services/...
 CHANNEL=#detrudr-alerts
 LOG_PATH=/var/log/nginx/hng-access.log
-EMAIL=admin@example.com
-PASSWORD=change-me
+
+####################################################################
+# Auth
+####################################################################
+EMAIL='hello@email.com'
+PASSWORD='supersecret'
+
+####################################################################
+# IP Blocking(For Prod, Set To `false` Else IP Blocking will fail)
+####################################################################
+DRY_RUN=true
 ```
 
 Environment overrides match the Python version:
@@ -62,6 +74,7 @@ Environment overrides match the Python version:
 - `LOG_PATH` overrides `log.path`.
 - `WEB_HOOK_URL` overrides `slack.webhook_url`.
 - `CHANNEL` overrides `slack.channel`.
+- `DRY_RUN` overrides `blocking.dry_run`.
 - `EMAIL` and `PASSWORD` are required for dashboard login.
 
 ## Run Locally

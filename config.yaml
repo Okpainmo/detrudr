@@ -24,7 +24,7 @@ thresholds:
   global_alert_cooldown_seconds: 60
 
 blocking:
-  dry_run: false
+  dry_run: true
   iptables_chain: INPUT
   ban_minutes:
     - 10
