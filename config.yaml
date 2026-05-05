@@ -30,6 +30,7 @@ blocking:
     - 10
     - 30
   ban_hours_final: 2
+  strike_decay_hours: 24
 
 slack:
   enabled: false

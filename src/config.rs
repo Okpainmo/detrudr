@@ -56,6 +56,7 @@ pub struct BlockingConfig {
     pub iptables_chain: String,
     pub ban_minutes: Vec<i64>,
     pub ban_hours_final: i64,
+    pub strike_decay_hours: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -25,6 +25,12 @@ struct BanRecord {
     duration_label: String,
 }
 
+#[derive(Clone, Debug)]
+struct StrikeRecord {
+    count: usize,
+    last_seen: DateTime<Utc>,
+}
+
 #[derive(Debug, Serialize)]
 struct BannedIpSnapshot {
     ip: String,
@@ -62,7 +68,7 @@ pub struct DetectionEngine {
     notifier: SlackNotifier,
     ban_durations: Vec<Duration>,
     banned_ips: HashMap<String, BanRecord>,
-    strike_counts: HashMap<String, usize>,
+    strike_counts: HashMap<String, StrikeRecord>,
     last_global_alert_at: Option<DateTime<Utc>>,
     global_alert_cooldown_seconds: i64,
     last_cpu_sample: Option<CpuSample>,
@@ -166,6 +172,7 @@ impl DetectionEngine {
         let now = Utc::now();
         self.flush_until(now);
         self.evict_old(now);
+        self.prune_expired_strikes(now);
         self.maybe_recalculate(now);
     }
 
@@ -349,9 +356,16 @@ impl DetectionEngine {
         baseline: f64,
         condition: &str,
     ) {
-        let strike = self.strike_counts.entry(ip_address.to_owned()).or_default();
-        *strike += 1;
-        let strike_count = *strike;
+        let strike = self
+            .strike_counts
+            .entry(ip_address.to_owned())
+            .or_insert(StrikeRecord {
+                count: 0,
+                last_seen: now,
+            });
+        strike.count += 1;
+        strike.last_seen = now;
+        let strike_count = strike.count;
 
         let (expires_at, duration_label) =
             if let Some(duration) = self.ban_durations.get(strike_count - 1) {
@@ -487,6 +501,17 @@ impl DetectionEngine {
         }
     }
 
+    fn prune_expired_strikes(&mut self, now: DateTime<Utc>) {
+        let decay_hours = self.config.blocking.strike_decay_hours;
+        if decay_hours <= 0 {
+            return;
+        }
+
+        let cutoff = now - Duration::hours(decay_hours);
+        self.strike_counts
+            .retain(|ip, record| should_retain_strike(ip, record, &self.banned_ips, cutoff));
+    }
+
     fn audit(
         &self,
         action: &str,
@@ -597,6 +622,15 @@ fn count_second(requests: &VecDeque<DateTime<Utc>>, second_mark: DateTime<Utc>) 
         .count()
 }
 
+fn should_retain_strike(
+    ip: &str,
+    record: &StrikeRecord,
+    banned_ips: &HashMap<String, BanRecord>,
+    cutoff: DateTime<Utc>,
+) -> bool {
+    banned_ips.contains_key(ip) || record.last_seen >= cutoff
+}
+
 fn zscore(rate: f64, baseline_mean: f64, baseline_stddev: f64) -> f64 {
     if baseline_stddev <= 0.0 {
         0.0
@@ -651,4 +685,64 @@ fn read_cpu_sample() -> Option<CpuSample> {
         values.get(3).copied().unwrap_or_default() + values.get(4).copied().unwrap_or_default();
     let total = values.iter().sum();
     Some(CpuSample { idle, total })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn strike_records_decay_after_cutoff_when_not_banned() {
+        let cutoff = Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap();
+        let record = StrikeRecord {
+            count: 1,
+            last_seen: cutoff - Duration::seconds(1),
+        };
+        let banned_ips = HashMap::new();
+
+        assert!(!should_retain_strike(
+            "198.51.100.10",
+            &record,
+            &banned_ips,
+            cutoff
+        ));
+    }
+
+    #[test]
+    fn strike_records_stay_when_recent_or_banned() {
+        let cutoff = Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap();
+        let recent = StrikeRecord {
+            count: 1,
+            last_seen: cutoff,
+        };
+        let old = StrikeRecord {
+            count: 1,
+            last_seen: cutoff - Duration::hours(1),
+        };
+        let mut banned_ips = HashMap::new();
+        banned_ips.insert(
+            "198.51.100.20".to_owned(),
+            BanRecord {
+                ip: "198.51.100.20".to_owned(),
+                strike_count: 1,
+                condition: "ip_rate".to_owned(),
+                expires_at: Some(cutoff + Duration::minutes(10)),
+                duration_label: "10m".to_owned(),
+            },
+        );
+
+        assert!(should_retain_strike(
+            "198.51.100.10",
+            &recent,
+            &banned_ips,
+            cutoff
+        ));
+        assert!(should_retain_strike(
+            "198.51.100.20",
+            &old,
+            &banned_ips,
+            cutoff
+        ));
+    }
 }

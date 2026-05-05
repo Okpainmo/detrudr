@@ -131,10 +131,7 @@ impl SlackNotifier {
         });
 
         if !self.enabled {
-            info!(
-                "Slack disabled. Payload={}",
-                serde_json::to_string(&payload).unwrap_or_default()
-            );
+            info!("Slack disabled. Skipping notification: {title}");
             return;
         }
         if self.webhook_url.trim().is_empty() {

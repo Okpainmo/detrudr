@@ -81,6 +81,10 @@ Environment overrides match the Python version:
 - `DRY_RUN` overrides `blocking.dry_run`.
 - `EMAIL` and `PASSWORD` are required for dashboard login.
 
+`blocking.strike_decay_hours` bounds strike-tracking memory by dropping strike history for IPs that
+have not been banned again within the decay window. Set it to `0` to keep strike history for the
+process lifetime.
+
 `dashboard.trusted_proxies` controls when the dashboard login limiter honors `X-Forwarded-For`. If a
 request does not come directly from one of those proxy IPs, Detrudr ignores the header and
 rate-limits by the socket peer address.

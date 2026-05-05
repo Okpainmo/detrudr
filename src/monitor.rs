@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::{
     fs::{self, File},
     io::{BufRead, BufReader, Seek, SeekFrom},
+    os::unix::fs::MetadataExt,
     path::Path,
     thread,
     time::Duration,
@@ -30,6 +31,12 @@ struct RawLogEntry {
     response_size: Option<serde_json::Value>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileMarker {
+    dev: u64,
+    ino: u64,
+}
+
 pub fn parse_timestamp(raw_timestamp: &str) -> DateTime<Utc> {
     if raw_timestamp.trim().is_empty() {
         return Utc::now();
@@ -54,7 +61,9 @@ pub fn parse_log_line(line: &str) -> Option<LogEntry> {
             .unwrap_or_else(Utc::now),
         method: raw.method.unwrap_or_else(|| "GET".to_owned()),
         path: raw.path.unwrap_or_else(|| "/".to_owned()),
-        status: value_to_u64(raw.status).unwrap_or_default() as u16,
+        status: value_to_u64(raw.status)
+            .and_then(|status| u16::try_from(status).ok())
+            .unwrap_or_default(),
         response_size: value_to_u64(raw.response_size).unwrap_or_default(),
     })
 }
@@ -81,6 +90,11 @@ where
             thread::sleep(sleep);
             continue;
         };
+        let Ok(metadata) = file.metadata() else {
+            thread::sleep(sleep);
+            continue;
+        };
+        let mut marker = file_marker(&metadata);
         let mut reader = BufReader::new(file);
         let _ = reader.seek(SeekFrom::End(0));
 
@@ -88,10 +102,28 @@ where
             let mut line = String::new();
             match reader.read_line(&mut line) {
                 Ok(0) => {
-                    if fs::metadata(path).is_err() {
-                        break;
+                    let position = reader.stream_position().unwrap_or(metadata.len());
+                    match fs::metadata(path) {
+                        Ok(current_metadata)
+                            if should_reopen(marker, position, &current_metadata) =>
+                        {
+                            let Ok(file) = File::open(path) else {
+                                break;
+                            };
+                            let Ok(current_metadata) = file.metadata() else {
+                                break;
+                            };
+                            marker = file_marker(&current_metadata);
+                            reader = BufReader::new(file);
+                            let _ = reader.seek(SeekFrom::Start(0));
+                        }
+                        Ok(_) => {
+                            thread::sleep(sleep);
+                        }
+                        Err(_) => {
+                            break;
+                        }
                     }
-                    thread::sleep(sleep);
                 }
                 Ok(_) => {
                     if let Some(entry) = parse_log_line(&line) {
@@ -102,6 +134,17 @@ where
             }
         }
     }
+}
+
+fn file_marker(metadata: &fs::Metadata) -> FileMarker {
+    FileMarker {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    }
+}
+
+fn should_reopen(marker: FileMarker, position: u64, metadata: &fs::Metadata) -> bool {
+    file_marker(metadata) != marker || metadata.len() < position
 }
 
 fn value_to_u64(value: Option<serde_json::Value>) -> Option<u64> {
@@ -125,5 +168,33 @@ mod tests {
         assert_eq!(entry.source_ip, "1.2.3.4");
         assert_eq!(entry.status, 404);
         assert_eq!(entry.response_size, 12);
+    }
+
+    #[test]
+    fn oversized_status_defaults_instead_of_wrapping() {
+        let entry = parse_log_line(
+            r#"{"source_ip":"1.2.3.4","timestamp":"2026-05-02T10:00:00Z","method":"GET","path":"/x","status":70000,"response_size":12}"#,
+        )
+        .unwrap();
+
+        assert_eq!(entry.status, 0);
+    }
+
+    #[test]
+    fn detects_log_replacement_by_file_marker_change() {
+        let marker = FileMarker { dev: 1, ino: 10 };
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let metadata = temp.as_file().metadata().unwrap();
+
+        assert!(should_reopen(marker, 0, &metadata));
+    }
+
+    #[test]
+    fn detects_log_truncation_by_size_decrease() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let metadata = temp.as_file().metadata().unwrap();
+        let marker = file_marker(&metadata);
+
+        assert!(should_reopen(marker, 100, &metadata));
     }
 }
