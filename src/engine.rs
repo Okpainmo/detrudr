@@ -356,6 +356,10 @@ impl DetectionEngine {
         baseline: f64,
         condition: &str,
     ) {
+        if !self.blocker.block(ip_address) {
+            return;
+        }
+
         let strike = self
             .strike_counts
             .entry(ip_address.to_owned())
@@ -373,10 +377,6 @@ impl DetectionEngine {
             } else {
                 (None, "permanent".to_owned())
             };
-
-        if !self.blocker.block(ip_address) {
-            return;
-        }
 
         let record = BanRecord {
             ip: ip_address.to_owned(),
