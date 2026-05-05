@@ -81,6 +81,10 @@ Environment overrides match the Python version:
 - `DRY_RUN` overrides `blocking.dry_run`.
 - `EMAIL` and `PASSWORD` are required for dashboard login.
 
+`dashboard.trusted_proxies` controls when the dashboard login limiter honors `X-Forwarded-For`. If a
+request does not come directly from one of those proxy IPs, Detrudr ignores the header and
+rate-limits by the socket peer address.
+
 For systemd deployments, create a dedicated service user during installation:
 
 ```bash
@@ -107,6 +111,10 @@ default audit path.
 ```bash
 cargo run -- --config config.yaml
 ```
+
+For local development without root/systemd setup, set `AUDIT_LOG_PATH=/tmp/detrudr-audit.log` in
+`.env`. Production systemd deployments should use the default persistent path under
+`/var/log/detrudr`.
 
 The dashboard is available at `http://localhost:8080`, and machine-readable metrics are available at
 `http://localhost:8080/metrics`.

@@ -1,5 +1,5 @@
 use log::{error, info};
-use std::process::Command;
+use std::process::{Command, Output};
 
 #[derive(Clone, Debug)]
 pub struct IptablesBlocker {
@@ -17,7 +17,26 @@ impl IptablesBlocker {
     }
 
     pub fn unblock(&self, ip_address: &str) -> bool {
+        if self.dry_run {
+            return self.run(&["-D", &self.chain, "-s", ip_address, "-j", "DROP"]);
+        }
+
+        if !self.rule_exists(ip_address) {
+            info!("No iptables rule found for {ip_address}, treating unblock as no-op");
+            return true;
+        }
+
         self.run(&["-D", &self.chain, "-s", ip_address, "-j", "DROP"])
+    }
+
+    fn rule_exists(&self, ip_address: &str) -> bool {
+        match self.output(&["-C", &self.chain, "-s", ip_address, "-j", "DROP"]) {
+            Ok(output) => output.status.success(),
+            Err(error) => {
+                error!("failed to execute iptables: {error}");
+                false
+            }
+        }
     }
 
     fn run(&self, args: &[&str]) -> bool {
@@ -26,7 +45,7 @@ impl IptablesBlocker {
             return true;
         }
 
-        match Command::new("iptables").args(args).output() {
+        match self.output(args) {
             Ok(output) if output.status.success() => true,
             Ok(output) => {
                 error!(
@@ -40,5 +59,9 @@ impl IptablesBlocker {
                 false
             }
         }
+    }
+
+    fn output(&self, args: &[&str]) -> std::io::Result<Output> {
+        Command::new("iptables").args(args).output()
     }
 }

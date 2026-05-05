@@ -39,6 +39,7 @@ fn main() -> Result<()> {
     start_dashboard(
         &config.dashboard.host,
         config.dashboard.port,
+        config.dashboard.trusted_proxies.clone(),
         Arc::clone(&engine),
         dashboard_auth,
     )?;

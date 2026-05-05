@@ -71,6 +71,8 @@ pub struct SlackConfig {
 pub struct DashboardConfig {
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

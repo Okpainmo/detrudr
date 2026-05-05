@@ -39,6 +39,9 @@ slack:
 dashboard:
   host: 127.0.0.1
   port: 8090
+  trusted_proxies:
+    - 127.0.0.1
+    - ::1
 
 audit:
   path: /var/log/detrudr/audit.log

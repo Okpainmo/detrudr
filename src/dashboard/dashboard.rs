@@ -2,10 +2,10 @@ use crate::{config::DashboardAuth, engine::DetectionEngine};
 use log::{error, info};
 use parking_lot::Mutex;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::Read,
-    net::ToSocketAddrs,
+    net::{IpAddr, ToSocketAddrs},
     sync::Arc,
     thread,
     time::{Duration, Instant},
@@ -24,12 +24,20 @@ const LOCKOUT_DURATION: Duration = Duration::from_secs(30);
 // --- Session store: token -> expiry instant ---
 type Sessions = Arc<Mutex<HashMap<String, Instant>>>;
 
-// --- Login rate limiter: ip -> (failure_count, window_start) ---
-type LoginLimiter = Arc<Mutex<HashMap<String, (u32, Instant)>>>;
+// --- Login rate limiter: ip -> attempt state ---
+type LoginLimiter = Arc<Mutex<HashMap<String, LoginAttempt>>>;
+
+#[derive(Clone, Debug)]
+struct LoginAttempt {
+    failure_count: u32,
+    window_start: Instant,
+    lockout_until: Option<Instant>,
+}
 
 pub fn start_dashboard(
     host: &str,
     port: u16,
+    trusted_proxies: Vec<String>,
     engine: Arc<Mutex<DetectionEngine>>,
     auth: DashboardAuth,
 ) -> anyhow::Result<()> {
@@ -42,13 +50,21 @@ pub fn start_dashboard(
 
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let limiter: LoginLimiter = Arc::new(Mutex::new(HashMap::new()));
+    let trusted_proxies = parse_trusted_proxies(trusted_proxies);
 
     thread::Builder::new()
         .name("dashboard".to_owned())
         .spawn(move || {
             info!("Dashboard listening on http://{bind}");
             for request in server.incoming_requests() {
-                if let Err(error) = handle_request(request, &engine, &auth, &sessions, &limiter) {
+                if let Err(error) = handle_request(
+                    request,
+                    &engine,
+                    &auth,
+                    &sessions,
+                    &limiter,
+                    &trusted_proxies,
+                ) {
                     error!("dashboard request failed: {error}");
                 }
             }
@@ -62,12 +78,13 @@ fn handle_request(
     auth: &DashboardAuth,
     sessions: &Sessions,
     limiter: &LoginLimiter,
+    trusted_proxies: &HashSet<IpAddr>,
 ) -> anyhow::Result<()> {
     let path = request.url().to_owned();
     let method = request.method().clone();
 
     if method == Method::Post && path == "/auth" {
-        return handle_login(request, auth, sessions, limiter);
+        return handle_login(request, auth, sessions, limiter, trusted_proxies);
     }
 
     if path == "/logout" {
@@ -88,6 +105,11 @@ fn handle_request(
     }
 
     if !is_authenticated(&request, sessions) {
+        if path == "/metrics" {
+            let response = unauthorized_json_response();
+            request.respond(response)?;
+            return Ok(());
+        }
         return respond_auth(request, StatusCode(200), None);
     }
 
@@ -118,27 +140,15 @@ fn handle_login(
     auth: &DashboardAuth,
     sessions: &Sessions,
     limiter: &LoginLimiter,
+    trusted_proxies: &HashSet<IpAddr>,
 ) -> anyhow::Result<()> {
-    // Derive a best-effort IP from the X-Forwarded-For or remote address.
-    let ip = request
+    let forwarded_for = request
         .headers()
         .iter()
         .find(|h| h.field.equiv("X-Forwarded-For"))
-        .map(|h| {
-            h.value
-                .as_str()
-                .split(',')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_owned()
-        })
-        .unwrap_or_else(|| {
-            request
-                .remote_addr()
-                .map(|a| a.ip().to_string())
-                .unwrap_or_default()
-        });
+        .map(|h| h.value.as_str());
+    let remote_ip = request.remote_addr().map(|address| address.ip());
+    let ip = vetted_client_ip(remote_ip, forwarded_for, trusted_proxies);
 
     // Check rate limit before even reading the body.
     if is_rate_limited(&ip, limiter) {
@@ -220,26 +230,84 @@ fn extract_session_cookie(request: &Request) -> Option<String> {
         .find_map(|(k, v)| if k == "session" { Some(v) } else { None })
 }
 
+fn parse_trusted_proxies(raw: Vec<String>) -> HashSet<IpAddr> {
+    raw.into_iter()
+        .filter_map(|proxy| proxy.trim().parse::<IpAddr>().ok())
+        .collect()
+}
+
+fn vetted_client_ip(
+    remote_ip: Option<IpAddr>,
+    forwarded_for: Option<&str>,
+    trusted_proxies: &HashSet<IpAddr>,
+) -> String {
+    if let Some(remote_ip) = remote_ip {
+        if trusted_proxies.contains(&remote_ip) {
+            if let Some(forwarded_ip) = first_forwarded_for_ip(forwarded_for) {
+                return forwarded_ip.to_string();
+            }
+        }
+        return remote_ip.to_string();
+    }
+
+    String::new()
+}
+
+fn first_forwarded_for_ip(raw: Option<&str>) -> Option<IpAddr> {
+    raw?.split(',')
+        .next()
+        .map(str::trim)
+        .filter(|ip| !ip.is_empty())
+        .and_then(|ip| ip.parse::<IpAddr>().ok())
+}
+
 fn is_rate_limited(ip: &str, limiter: &LoginLimiter) -> bool {
-    let store = limiter.lock();
-    if let Some(&(count, window_start)) = store.get(ip) {
-        // Still within the window and over the limit → locked out.
-        if count >= MAX_ATTEMPTS && window_start.elapsed() < LOCKOUT_DURATION {
-            return true;
+    let mut store = limiter.lock();
+    let now = Instant::now();
+    let mut remove_entry = false;
+
+    if let Some(entry) = store.get_mut(ip) {
+        if let Some(lockout_until) = entry.lockout_until {
+            if now < lockout_until {
+                return true;
+            }
+            entry.lockout_until = None;
+        }
+
+        if now.duration_since(entry.window_start) > ATTEMPT_WINDOW {
+            remove_entry = true;
         }
     }
+
+    if remove_entry {
+        store.remove(ip);
+    }
+
     false
 }
 
 fn record_failure(ip: &str, limiter: &LoginLimiter) {
     let mut store = limiter.lock();
     let now = Instant::now();
-    let entry = store.entry(ip.to_owned()).or_insert((0, now));
+    let entry = store.entry(ip.to_owned()).or_insert(LoginAttempt {
+        failure_count: 0,
+        window_start: now,
+        lockout_until: None,
+    });
+
     // Reset window if the previous attempt window has expired.
-    if entry.1.elapsed() > ATTEMPT_WINDOW {
-        *entry = (0, now);
+    if now.duration_since(entry.window_start) > ATTEMPT_WINDOW {
+        *entry = LoginAttempt {
+            failure_count: 0,
+            window_start: now,
+            lockout_until: None,
+        };
     }
-    entry.0 += 1;
+
+    entry.failure_count += 1;
+    if entry.failure_count >= MAX_ATTEMPTS {
+        entry.lockout_until = Some(now + LOCKOUT_DURATION);
+    }
 }
 
 /// Generates a 128-bit random hex token from /dev/urandom — no extra dependency needed.
@@ -315,6 +383,12 @@ fn json_header() -> Header {
     Header::from_bytes("Content-Type", "application/json").expect("valid header")
 }
 
+fn unauthorized_json_response() -> Response<std::io::Cursor<Vec<u8>>> {
+    Response::from_string(r#"{"error":"unauthorized"}"#)
+        .with_status_code(StatusCode(401))
+        .with_header(json_header())
+}
+
 fn html_header() -> Header {
     Header::from_bytes("Content-Type", "text/html; charset=utf-8").expect("valid header")
 }
@@ -344,6 +418,67 @@ mod tests {
             record_failure("1.2.3.4", &limiter);
         }
         assert!(is_rate_limited("1.2.3.4", &limiter));
+    }
+
+    #[test]
+    fn rate_limiter_uses_lockout_until_instead_of_window_start() {
+        let limiter: LoginLimiter = Arc::new(Mutex::new(HashMap::new()));
+        limiter.lock().insert(
+            "1.2.3.4".to_owned(),
+            LoginAttempt {
+                failure_count: MAX_ATTEMPTS,
+                window_start: Instant::now() - LOCKOUT_DURATION,
+                lockout_until: Some(Instant::now() + LOCKOUT_DURATION),
+            },
+        );
+
+        assert!(is_rate_limited("1.2.3.4", &limiter));
+    }
+
+    #[test]
+    fn rate_limiter_clears_expired_lockout() {
+        let limiter: LoginLimiter = Arc::new(Mutex::new(HashMap::new()));
+        limiter.lock().insert(
+            "1.2.3.4".to_owned(),
+            LoginAttempt {
+                failure_count: MAX_ATTEMPTS,
+                window_start: Instant::now(),
+                lockout_until: Some(Instant::now() - Duration::from_secs(1)),
+            },
+        );
+
+        assert!(!is_rate_limited("1.2.3.4", &limiter));
+        assert_eq!(
+            limiter
+                .lock()
+                .get("1.2.3.4")
+                .and_then(|entry| entry.lockout_until),
+            None
+        );
+    }
+
+    #[test]
+    fn client_ip_ignores_forwarded_for_from_untrusted_peer() {
+        let trusted = HashSet::new();
+        let ip = vetted_client_ip(
+            Some("203.0.113.10".parse().unwrap()),
+            Some("198.51.100.20"),
+            &trusted,
+        );
+
+        assert_eq!(ip, "203.0.113.10");
+    }
+
+    #[test]
+    fn client_ip_uses_forwarded_for_from_trusted_proxy() {
+        let trusted = HashSet::from(["127.0.0.1".parse().unwrap()]);
+        let ip = vetted_client_ip(
+            Some("127.0.0.1".parse().unwrap()),
+            Some("198.51.100.20, 203.0.113.10"),
+            &trusted,
+        );
+
+        assert_eq!(ip, "198.51.100.20");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 
@@ -59,6 +59,8 @@ impl RollingBaseline {
     }
 
     pub fn add_sample(&mut self, sample_time: DateTime<Utc>, value: f64) {
+        self.prune_stale_buckets(sample_time);
+
         let hour_slot = sample_time.format("%Y-%m-%dT%H").to_string();
         let bucket = self.hourly_samples.entry(hour_slot).or_default();
         bucket.push_back(value);
@@ -90,14 +92,7 @@ impl RollingBaseline {
                 current_hour.clone(),
             )
         } else {
-            (
-                self.merge_recent_samples(),
-                if preferred.is_empty() {
-                    "rolling".to_owned()
-                } else {
-                    current_hour.clone()
-                },
-            )
+            (self.merge_recent_samples(), "rolling".to_owned())
         };
 
         let computed_mean = mean(&selected).unwrap_or(self.floor_mean);
@@ -162,6 +157,23 @@ impl RollingBaseline {
         let start = merged.len().saturating_sub(self.history_seconds);
         merged[start..].to_vec()
     }
+
+    fn prune_stale_buckets(&mut self, sample_time: DateTime<Utc>) {
+        let cutoff = sample_time - Duration::seconds(self.history_seconds as i64);
+        self.hourly_samples.retain(|slot, samples| {
+            !samples.is_empty()
+                && parse_hour_slot(slot)
+                    .map(|hour_start| hour_start + Duration::hours(1) > cutoff)
+                    .unwrap_or(false)
+        });
+    }
+}
+
+fn parse_hour_slot(slot: &str) -> Option<DateTime<Utc>> {
+    let raw = format!("{slot}:00:00");
+    NaiveDateTime::parse_from_str(&raw, "%Y-%m-%dT%H:%M:%S")
+        .ok()
+        .map(|time| DateTime::from_naive_utc_and_offset(time, Utc))
 }
 
 fn mean(values: &[f64]) -> Option<f64> {
@@ -204,5 +216,41 @@ mod tests {
         let stats = baseline.recalculate(Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap());
         assert_eq!(stats.mean, 1.0);
         assert_eq!(stats.stddev, 0.5);
+    }
+
+    #[test]
+    fn add_sample_prunes_hour_buckets_outside_history_window() {
+        let mut baseline = RollingBaseline::new(1800, 60, 300, 1.0, 0.5);
+
+        baseline.add_sample(Utc.with_ymd_and_hms(2026, 5, 2, 10, 0, 0).unwrap(), 100.0);
+        baseline.add_sample(Utc.with_ymd_and_hms(2026, 5, 2, 12, 45, 0).unwrap(), 2.0);
+
+        assert!(!baseline.hourly_samples.contains_key("2026-05-02T10"));
+        let stats = baseline.recalculate(Utc.with_ymd_and_hms(2026, 5, 2, 12, 45, 0).unwrap());
+        assert_eq!(stats.sample_size, 1);
+        assert_eq!(stats.mean, 2.0);
+    }
+
+    #[test]
+    fn add_sample_keeps_bucket_that_overlaps_history_window() {
+        let mut baseline = RollingBaseline::new(1800, 60, 300, 1.0, 0.5);
+
+        baseline.add_sample(Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(), 3.0);
+        baseline.add_sample(Utc.with_ymd_and_hms(2026, 5, 2, 12, 45, 0).unwrap(), 5.0);
+
+        assert!(baseline.hourly_samples.contains_key("2026-05-02T12"));
+    }
+
+    #[test]
+    fn recalculate_labels_merged_samples_as_rolling() {
+        let mut baseline = RollingBaseline::new(1800, 60, 300, 1.0, 0.5);
+
+        baseline.add_sample(Utc.with_ymd_and_hms(2026, 5, 2, 11, 59, 0).unwrap(), 4.0);
+        baseline.add_sample(Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(), 6.0);
+
+        let stats = baseline.recalculate(Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap());
+
+        assert_eq!(stats.hour_slot, "rolling");
+        assert_eq!(stats.sample_size, 2);
     }
 }
