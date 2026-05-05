@@ -169,7 +169,7 @@ fn handle_login(
         // Reset any accumulated failures for this IP on success.
         limiter.lock().remove(&ip);
 
-        let token = generate_token();
+        let token = generate_token()?;
         let expiry = Instant::now() + Duration::from_secs(SESSION_SECONDS);
         sessions.lock().insert(token.clone(), expiry);
 
@@ -264,6 +264,7 @@ fn first_forwarded_for_ip(raw: Option<&str>) -> Option<IpAddr> {
 fn is_rate_limited(ip: &str, limiter: &LoginLimiter) -> bool {
     let mut store = limiter.lock();
     let now = Instant::now();
+    prune_limiter(&mut store, now);
     let mut remove_entry = false;
 
     if let Some(entry) = store.get_mut(ip) {
@@ -289,6 +290,7 @@ fn is_rate_limited(ip: &str, limiter: &LoginLimiter) -> bool {
 fn record_failure(ip: &str, limiter: &LoginLimiter) {
     let mut store = limiter.lock();
     let now = Instant::now();
+    prune_limiter(&mut store, now);
     let entry = store.entry(ip.to_owned()).or_insert(LoginAttempt {
         failure_count: 0,
         window_start: now,
@@ -310,13 +312,19 @@ fn record_failure(ip: &str, limiter: &LoginLimiter) {
     }
 }
 
+fn prune_limiter(store: &mut HashMap<String, LoginAttempt>, now: Instant) {
+    store.retain(|_, entry| {
+        let lockout_active = entry.lockout_until.is_some_and(|until| now < until);
+        let in_window = now.duration_since(entry.window_start) <= ATTEMPT_WINDOW;
+        lockout_active || in_window
+    });
+}
+
 /// Generates a 128-bit random hex token from /dev/urandom — no extra dependency needed.
-fn generate_token() -> String {
+fn generate_token() -> anyhow::Result<String> {
     let mut buf = [0u8; 16];
-    File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .unwrap_or_default();
-    buf.iter().map(|b| format!("{b:02x}")).collect()
+    File::open("/dev/urandom")?.read_exact(&mut buf)?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn parse_cookie_header(raw: &str) -> HashMap<String, String> {
@@ -458,6 +466,42 @@ mod tests {
     }
 
     #[test]
+    fn rate_limiter_prunes_stale_entries() {
+        let now = Instant::now();
+        let mut store = HashMap::new();
+        store.insert(
+            "stale".to_owned(),
+            LoginAttempt {
+                failure_count: 1,
+                window_start: now - ATTEMPT_WINDOW - Duration::from_secs(1),
+                lockout_until: None,
+            },
+        );
+        store.insert(
+            "in-window".to_owned(),
+            LoginAttempt {
+                failure_count: 1,
+                window_start: now,
+                lockout_until: None,
+            },
+        );
+        store.insert(
+            "locked".to_owned(),
+            LoginAttempt {
+                failure_count: MAX_ATTEMPTS,
+                window_start: now - ATTEMPT_WINDOW - Duration::from_secs(1),
+                lockout_until: Some(now + LOCKOUT_DURATION),
+            },
+        );
+
+        prune_limiter(&mut store, now);
+
+        assert!(!store.contains_key("stale"));
+        assert!(store.contains_key("in-window"));
+        assert!(store.contains_key("locked"));
+    }
+
+    #[test]
     fn client_ip_ignores_forwarded_for_from_untrusted_peer() {
         let trusted = HashSet::new();
         let ip = vetted_client_ip(
@@ -483,7 +527,7 @@ mod tests {
 
     #[test]
     fn generate_token_is_32_chars() {
-        let token = generate_token();
+        let token = generate_token().unwrap();
         assert_eq!(token.len(), 32);
     }
 }

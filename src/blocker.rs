@@ -21,20 +21,24 @@ impl IptablesBlocker {
             return self.run(&["-D", &self.chain, "-s", ip_address, "-j", "DROP"]);
         }
 
-        if !self.rule_exists(ip_address) {
-            info!("No iptables rule found for {ip_address}, treating unblock as no-op");
-            return true;
+        match self.rule_exists(ip_address) {
+            Ok(true) => {}
+            Ok(false) => {
+                info!("No iptables rule found for {ip_address}, treating unblock as no-op");
+                return true;
+            }
+            Err(()) => return false,
         }
 
         self.run(&["-D", &self.chain, "-s", ip_address, "-j", "DROP"])
     }
 
-    fn rule_exists(&self, ip_address: &str) -> bool {
+    fn rule_exists(&self, ip_address: &str) -> Result<bool, ()> {
         match self.output(&["-C", &self.chain, "-s", ip_address, "-j", "DROP"]) {
-            Ok(output) => output.status.success(),
+            Ok(output) => Ok(output.status.success()),
             Err(error) => {
                 error!("failed to execute iptables: {error}");
-                false
+                Err(())
             }
         }
     }

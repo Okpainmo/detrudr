@@ -108,12 +108,18 @@ pub fn load_dotenv(path: &Path) -> Result<()> {
         }
         let mut parts = line.splitn(2, '=');
         let key = parts.next().unwrap_or_default().trim();
+        if key.is_empty() || key.contains('=') || key.contains('\0') {
+            continue;
+        }
         let value = parts
             .next()
             .unwrap_or_default()
             .trim()
             .trim_matches('"')
             .trim_matches('\'');
+        if value.contains('\0') {
+            continue;
+        }
         if env::var_os(key).is_none() {
             env::set_var(key, value);
         }
