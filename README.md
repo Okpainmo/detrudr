@@ -55,6 +55,7 @@ Static settings live in `config.yaml`. Runtime values can be provided in `.env`:
 ####################################################################
 WEB_HOOK_URL=https://hooks.slack.com/services/...
 CHANNEL=#detrudr-alerts
+ENABLE_SLACK_NOTIFICATION=false
 LOG_PATH=/var/log/nginx/hng-access.log
 
 ####################################################################
@@ -74,6 +75,7 @@ Environment overrides match the Python version:
 - `LOG_PATH` overrides `log.path`.
 - `WEB_HOOK_URL` overrides `slack.webhook_url`.
 - `CHANNEL` overrides `slack.channel`.
+- `ENABLE_SLACK_NOTIFICATION` overrides `slack.enabled`.
 - `DRY_RUN` overrides `blocking.dry_run`.
 - `EMAIL` and `PASSWORD` are required for dashboard login.
 

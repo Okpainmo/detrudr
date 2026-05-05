@@ -32,7 +32,7 @@ blocking:
   ban_hours_final: 2
 
 slack:
-  enabled: true
+  enabled: false
   webhook_url: ""
   channel: ""
 

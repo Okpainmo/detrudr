@@ -152,6 +152,11 @@ fn apply_env_overrides(config: &mut Config) -> Result<()> {
             config.slack.channel = channel.trim().to_owned();
         }
     }
+    if let Ok(enabled) = env::var("ENABLE_SLACK_NOTIFICATION") {
+        if !enabled.trim().is_empty() {
+            config.slack.enabled = parse_bool_env("ENABLE_SLACK_NOTIFICATION", &enabled)?;
+        }
+    }
     if let Ok(dry_run) = env::var("DRY_RUN") {
         if !dry_run.trim().is_empty() {
             config.blocking.dry_run = parse_bool_env("DRY_RUN", &dry_run)?;
