@@ -37,8 +37,8 @@ slack:
   channel: ""
 
 dashboard:
-  host: 0.0.0.0
+  host: 127.0.0.1
   port: 8090
 
 audit:
-  path: /tmp/detrudr-audit.log
+  path: /var/log/detrudr/audit.log

@@ -142,6 +142,11 @@ fn apply_env_overrides(config: &mut Config) -> Result<()> {
             config.log.path = path.trim().to_owned();
         }
     }
+    if let Ok(path) = env::var("AUDIT_LOG_PATH") {
+        if !path.trim().is_empty() {
+            config.audit.path = path.trim().to_owned();
+        }
+    }
     if let Ok(webhook) = env::var("WEB_HOOK_URL") {
         if !webhook.trim().is_empty() {
             config.slack.webhook_url = webhook.trim().to_owned();

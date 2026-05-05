@@ -53,10 +53,11 @@ Static settings live in `config.yaml`. Runtime values can be provided in `.env`:
 ####################################################################
 # Slack
 ####################################################################
-WEB_HOOK_URL=https://hooks.slack.com/services/...
-CHANNEL=#detrudr-alerts
+WEB_HOOK_URL='https://hooks.slack.com/services/...'
+CHANNEL='#channel-name'
 ENABLE_SLACK_NOTIFICATION=false
-LOG_PATH=/var/log/nginx/hng-access.log
+LOG_PATH='/var/log/nginx/detrudr-stream.log'
+AUDIT_LOG_PATH='/var/log/detrudr/audit.log'
 
 ####################################################################
 # Auth
@@ -73,11 +74,22 @@ DRY_RUN=true
 Environment overrides match the Python version:
 
 - `LOG_PATH` overrides `log.path`.
+- `AUDIT_LOG_PATH` overrides `audit.path`.
 - `WEB_HOOK_URL` overrides `slack.webhook_url`.
 - `CHANNEL` overrides `slack.channel`.
 - `ENABLE_SLACK_NOTIFICATION` overrides `slack.enabled`.
 - `DRY_RUN` overrides `blocking.dry_run`.
 - `EMAIL` and `PASSWORD` are required for dashboard login.
+
+For systemd deployments, prefer a persistent audit path such as `/var/log/detrudr/audit.log`. The
+service can let systemd create the directory with the right ownership:
+
+```ini
+[Service]
+User=your-user-name
+Group=your-group-name
+LogsDirectory=detrudr
+```
 
 ## Run Locally
 
