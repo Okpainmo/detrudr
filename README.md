@@ -935,7 +935,8 @@ DRY_RUN=true
 cargo dev
 ```
 
-See `.cargo/config.toml` to see the use of the `dev` as an alias for `watch -c -w src -x 'run -- --config config.yaml'`.
+See `.cargo/config.toml` to see the use of the `dev` as an alias for
+`watch -c -w src -x 'run -- --config config.yaml'`.
 
 The daemon tails `LOG_PATH`, so make sure that path exists and receives JSON nginx log lines. If you
 only want to exercise parsing and tests, use `cargo test`.
