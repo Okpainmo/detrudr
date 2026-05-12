@@ -7,6 +7,12 @@ default_job = "check"
 [env]
 CARGO_TERM_COLOR = "always"
 
+[jobs.dev]
+command = ["cargo", "run", "--", "--config", "config.yaml"]
+need_stdout = true
+allow_warnings = true
+on_change_strategy = "kill_then_restart"
+
 [jobs.check]
 command = ["cargo", "check"]
 need_stdout = false
@@ -75,7 +81,16 @@ command = ["cargo", "run", "--example"]
 need_stdout = true
 allow_warnings = true
 
+[jobs.build]
+command = ["cargo", "build", "--release"]
+on_success = "back"
+
 [keybindings]
+b = "job:build"
 c = "job:clippy-all"
 f = "job:fmt"
 p = "job:pedantic"
+d = "job:dev"
+alt-d = "job:doc-open"
+ctrl-r = "job:run-long"
+
