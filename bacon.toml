@@ -8,7 +8,9 @@ default_job = "check"
 CARGO_TERM_COLOR = "always"
 
 [jobs.dev]
-command = ["cargo", "run"]
+command = ["cargo", "run", "--", "--config", "config.yaml"]
+need_stdout = true
+allow_warnings = true
 on_change_strategy = "kill_then_restart"
 
 [jobs.check]

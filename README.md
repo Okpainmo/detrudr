@@ -453,7 +453,7 @@ not exposed directly. For the recommended same-server setup, keep `127.0.0.1` an
 >
 > For a more thorough and beginner friendly production deployment guide, read this article where I
 > practically walked through
-> **[deploying detrudr to a sample real-life production environemnt](https://okpainmo.com/posts/deploying-detrudr-to-a-sample-real-life-production-environemnt)**.
+> **[deploying detrudr to a sample real-life production environment](https://okpainmo.com/posts/deploying-detrudr-to-a-sample-real-life-production-environment)**.
 
 For production environments, systemd-managed deployments are recommended. This gives Detrudr
 predictable startup, restarts, logging, Linux capabilities, and audit-directory behavior.
@@ -704,7 +704,7 @@ AUDIT_LOG_PATH='/var/log/detrudr/audit.log'
 DRY_RUN=false
 ```
 
-4. Finally, create a system service to manage the Detrudr process.
+3. Finally, create a system service to manage the Detrudr process.
 
 The service file below assumes these defaults:
 
@@ -935,8 +935,7 @@ DRY_RUN=true
 cargo dev
 ```
 
-See `./cargo/config.toml` to see the use of the `dev` as as an alias for
-`watch -c -w src -x 'run -- --config config.yaml'`.
+See `.cargo/config.toml` to see the use of the `dev` as an alias for `watch -c -w src -x 'run -- --config config.yaml'`.
 
 The daemon tails `LOG_PATH`, so make sure that path exists and receives JSON nginx log lines. If you
 only want to exercise parsing and tests, use `cargo test`.
