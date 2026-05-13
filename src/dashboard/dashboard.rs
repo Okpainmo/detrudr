@@ -176,7 +176,14 @@ fn handle_login(
                 Some("Login request is too large."),
             );
         }
-        Err(LoginBodyError::Read(error)) => return Err(error.into()),
+        Err(LoginBodyError::Read(error)) => {
+            error!("failed to read login body: {error}");
+            return respond_auth(
+                request,
+                StatusCode(400),
+                Some("Malformed login request body."),
+            );
+        }
     };
     let form = parse_form_body(&body);
     let email = form.get("email").map(String::as_str).unwrap_or_default();
