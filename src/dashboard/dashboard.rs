@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
-    io::Read,
+    io::{ErrorKind, Read},
     net::{IpAddr, ToSocketAddrs},
     sync::Arc,
     thread,
@@ -20,6 +20,7 @@ const SESSION_SECONDS: u64 = 60 * 60;
 const MAX_ATTEMPTS: u32 = 5;
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
 const LOCKOUT_DURATION: Duration = Duration::from_secs(30);
+const MAX_LOGIN_BODY_BYTES: usize = 8 * 1024;
 
 // --- Session store: token -> expiry instant ---
 type Sessions = Arc<Mutex<HashMap<String, Instant>>>;
@@ -159,8 +160,31 @@ fn handle_login(
         );
     }
 
-    let mut body = String::new();
-    request.as_reader().read_to_string(&mut body)?;
+    let body = match read_login_body(&mut request) {
+        Ok(body) => body,
+        Err(LoginBodyError::MissingLength) => {
+            return respond_auth(
+                request,
+                StatusCode(411),
+                Some("Login request is missing a content length."),
+            );
+        }
+        Err(LoginBodyError::TooLarge) => {
+            return respond_auth(
+                request,
+                StatusCode(413),
+                Some("Login request is too large."),
+            );
+        }
+        Err(LoginBodyError::Read(error)) => {
+            error!("failed to read login body: {error}");
+            return respond_auth(
+                request,
+                StatusCode(400),
+                Some("Malformed login request body."),
+            );
+        }
+    };
     let form = parse_form_body(&body);
     let email = form.get("email").map(String::as_str).unwrap_or_default();
     let password = form.get("password").map(String::as_str).unwrap_or_default();
@@ -318,6 +342,38 @@ fn prune_limiter(store: &mut HashMap<String, LoginAttempt>, now: Instant) {
         let in_window = now.duration_since(entry.window_start) <= ATTEMPT_WINDOW;
         lockout_active || in_window
     });
+}
+
+#[derive(Debug)]
+enum LoginBodyError {
+    MissingLength,
+    TooLarge,
+    Read(std::io::Error),
+}
+
+fn read_login_body(request: &mut Request) -> Result<String, LoginBodyError> {
+    let Some(length) = content_length(request) else {
+        return Err(LoginBodyError::MissingLength);
+    };
+    if length > MAX_LOGIN_BODY_BYTES {
+        return Err(LoginBodyError::TooLarge);
+    }
+
+    let mut bytes = vec![0; length];
+    request
+        .as_reader()
+        .read_exact(&mut bytes)
+        .map_err(LoginBodyError::Read)?;
+    String::from_utf8(bytes)
+        .map_err(|error| LoginBodyError::Read(std::io::Error::new(ErrorKind::InvalidData, error)))
+}
+
+fn content_length(request: &Request) -> Option<usize> {
+    request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Content-Length"))
+        .and_then(|h| h.value.as_str().trim().parse::<usize>().ok())
 }
 
 /// Generates a 128-bit random hex token from /dev/urandom — no extra dependency needed.
